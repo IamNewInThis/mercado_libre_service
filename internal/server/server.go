@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/IamNewInThis/mercado_libre_service/internal/mercadolibre"
 	"github.com/IamNewInThis/mercado_libre_service/internal/odoo"
 )
 
@@ -14,14 +15,16 @@ import (
 type Server struct {
 	port       string
 	odooClient *odoo.Client
+	mlClient   *mercadolibre.Client
 	httpServer *http.Server
 }
 
 // NewServer crea una nueva instancia del servidor
-func NewServer(port string, odooClient *odoo.Client) *Server {
+func NewServer(port string, odooClient *odoo.Client, mlClient *mercadolibre.Client) *Server {
 	return &Server{
 		port:       port,
 		odooClient: odooClient,
+		mlClient:   mlClient,
 	}
 }
 
@@ -34,6 +37,11 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/odoo/status", s.handleOdooStatus)
 	mux.HandleFunc("/odoo/product/", s.handleGetProduct)
+
+	// Rutas de Mercado Libre OAuth
+	mux.HandleFunc("/ml/auth", s.handleMLAuth)
+	mux.HandleFunc("/ml/oauth/callback", s.handleMLCallback)
+	mux.HandleFunc("/ml/status", s.handleMLStatus)
 
 	s.httpServer = &http.Server{
 		Addr:         ":" + s.port,
@@ -149,6 +157,92 @@ func (s *Server) handleGetProduct(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.sendJSON(w, http.StatusOK, product)
+}
+
+// handleMLAuth inicia el flujo de autenticación OAuth con Mercado Libre
+func (s *Server) handleMLAuth(w http.ResponseWriter, r *http.Request) {
+	if s.mlClient == nil {
+		s.sendJSON(w, http.StatusServiceUnavailable, map[string]interface{}{
+			"error": "Cliente Mercado Libre no configurado",
+		})
+		return
+	}
+
+	// Generar state para seguridad
+	state := fmt.Sprintf("state_%d", time.Now().Unix())
+	authURL := s.mlClient.GetAuthURL(state)
+
+	log.Printf("🔐 Iniciando OAuth con Mercado Libre")
+
+	// Redirigir al usuario a Mercado Libre
+	http.Redirect(w, r, authURL, http.StatusTemporaryRedirect)
+}
+
+// handleMLCallback maneja el callback de OAuth de Mercado Libre
+func (s *Server) handleMLCallback(w http.ResponseWriter, r *http.Request) {
+	if s.mlClient == nil {
+		s.sendJSON(w, http.StatusServiceUnavailable, map[string]interface{}{
+			"error": "Cliente Mercado Libre no configurado",
+		})
+		return
+	}
+
+	// Obtener el código del query param
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		error := r.URL.Query().Get("error")
+		s.sendJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"error": fmt.Sprintf("Error en OAuth: %s", error),
+		})
+		return
+	}
+
+	// Intercambiar código por access token
+	if err := s.mlClient.ExchangeCodeForToken(code); err != nil {
+		log.Printf("❌ Error obteniendo access token: %v", err)
+		s.sendJSON(w, http.StatusInternalServerError, map[string]interface{}{
+			"error": fmt.Sprintf("Error obteniendo token: %v", err),
+		})
+		return
+	}
+
+	log.Printf("✅ Access token obtenido exitosamente")
+	log.Printf("🔑 ACCESS TOKEN: %s", s.mlClient.AccessToken)
+	log.Printf("🔄 REFRESH TOKEN: %s", s.mlClient.RefreshToken)
+	log.Printf("⏰ Expira en: %v", s.mlClient.ExpiresAt)
+
+	s.sendJSON(w, http.StatusOK, map[string]interface{}{
+		"status":        "success",
+		"message":       "Autenticación exitosa con Mercado Libre",
+		"access_token":  s.mlClient.AccessToken,
+		"refresh_token": s.mlClient.RefreshToken,
+		"expires_at":    s.mlClient.ExpiresAt,
+	})
+}
+
+// handleMLStatus verifica el estado de la autenticación con Mercado Libre
+func (s *Server) handleMLStatus(w http.ResponseWriter, r *http.Request) {
+	if s.mlClient == nil {
+		s.sendJSON(w, http.StatusServiceUnavailable, map[string]interface{}{
+			"status":  "error",
+			"message": "Cliente Mercado Libre no configurado",
+		})
+		return
+	}
+
+	if !s.mlClient.IsTokenValid() {
+		s.sendJSON(w, http.StatusUnauthorized, map[string]interface{}{
+			"status":  "unauthorized",
+			"message": "No hay token válido. Inicia el flujo OAuth en /ml/auth",
+		})
+		return
+	}
+
+	s.sendJSON(w, http.StatusOK, map[string]interface{}{
+		"status":     "authenticated",
+		"expires_at": s.mlClient.ExpiresAt,
+		"has_token":  s.mlClient.AccessToken != "",
+	})
 }
 
 // sendJSON envía una respuesta JSON
