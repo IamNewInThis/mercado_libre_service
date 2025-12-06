@@ -61,7 +61,7 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 	response := map[string]interface{}{
 		"service": "Mercado Libre Service",
-		"version": "1.0.0",
+		"version": "1.0.1",
 		"status":  "running",
 		"message": "Middleware para integración Odoo - Mercado Libre",
 	}
